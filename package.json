@@ -1,0 +1,16 @@
+{
+  "name": "rd-automation",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  },
+  "scripts": {
+    "start": "node --env-file=.env rd-auto.js",
+    "dev": "nodemon --legacy-watch rd-auto.js"
+  }
+}
