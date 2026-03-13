@@ -78,28 +78,6 @@ docker ps | grep rd-auto
 curl http://localhost:3000/health
 ```
 
-### Rebuilding After Code Changes
-
-When you modify the code, rebuild and restart the container:
-
-```bash
-# Build new image
-docker build --no-cache -t rd-automation .
-
-# Stop and remove old container
-docker stop rd-auto || true
-docker rm rd-auto || true
-
-# Start updated container
-docker run -d \
-  --name rd-auto \
-  --network seerr-rd-net \
-  -p 3000:3000 \
-  --env-file .env \
-  -v "$(pwd):/app" \
-  rd-automation
-```
-
 ### Seerr Integration
 
 #### Webhook Configuration
@@ -129,3 +107,25 @@ Since both containers are on the same Docker network, Seerr can reach RD Automat
 Since we named the container `rd-auto` in the steps above, we are now allowed to communicate directly with the container using the `rd-auto` hostname. This webhook should be sent to `http://rd-auto:3000/request`
 
 I have this webhook firing on Request Approved on my end. You may need to do manual setup for auto approval on Plex Watchlist sync. The Seerr docs are very clear on how this can be done.
+
+### Rebuilding After Code Changes
+
+When you modify the code, rebuild and restart the container:
+
+```bash
+# Build new image
+docker build --no-cache -t rd-automation .
+
+# Stop and remove old container
+docker stop rd-auto || true
+docker rm rd-auto || true
+
+# Start updated container
+docker run -d \
+  --name rd-auto \
+  --network seerr-rd-net \
+  -p 3000:3000 \
+  --env-file .env \
+  -v "$(pwd):/app" \
+  rd-automation
+```
