@@ -119,21 +119,6 @@ Set the webhook URL to: `http://rd-auto:3000/request`
 
 Since both containers are on the same Docker network, Seerr can reach RD Automation using the container name `rd-auto` as the hostname.
 
-
-### Seerr Setup
-
-You're going to need to create a webhook that looks like this:
-
-```
-{
-  "tmdbId": "{{media_tmdbid}}",
-  "mediaType": "{{media_type}}",
-  "seasonNumber": "{{season_number}}",
-  "episodeNumber": "{{episode_number}}",
-  "{{extra}}": []
-}
-```
-
 Since we named the container `rd-auto` in the steps above, we are now allowed to communicate directly with the container using the `rd-auto` hostname. This webhook should be sent to `http://rd-auto:3000/request`
 
 I have this webhook firing on Request Approved on my end. You may need to do manual setup for auto approval on Plex Watchlist sync. The Seerr docs are very clear on how this can be done.
