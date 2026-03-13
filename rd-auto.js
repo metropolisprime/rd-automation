@@ -15,6 +15,147 @@ app.use(express.json());
 
 // ----------------------- Helpers -----------------------
 
+const RD_MAX_PER_MINUTE = Number(process.env.RD_MAX_PER_MINUTE || "250");
+const rdRequestTimestamps = [];
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function rdRateLimit() {
+  const now = Date.now();
+  while (rdRequestTimestamps.length) {
+    if (now - rdRequestTimestamps[0] > 60_000) rdRequestTimestamps.shift();
+    else break;
+  }
+
+  if (rdRequestTimestamps.length >= RD_MAX_PER_MINUTE) {
+    const waitMs = 60_000 - (now - rdRequestTimestamps[0]) + 10;
+    await sleep(waitMs);
+    return rdRateLimit();
+  }
+
+  rdRequestTimestamps.push(Date.now());
+}
+
+async function rdFetch(url, options = {}) {
+  await rdRateLimit();
+  return fetch(url, options);
+}
+
+function parseEpisodes(filename) {
+  if (!filename) return [];
+
+  const text = String(filename);
+  const results = [];
+  const seasonEpisodeRegex = /S(\d{1,2})[ ._-]*E(\d{2})(?:[ ._-]*E(\d{2}))*/gi;
+  let match;
+
+  while ((match = seasonEpisodeRegex.exec(text)) !== null) {
+    const season = parseInt(match[1], 10);
+    const chunk = match[0];
+    const epRegex = /E(\d{2})/gi;
+    let epMatch;
+
+    while ((epMatch = epRegex.exec(chunk)) !== null) {
+      results.push({ season, episode: parseInt(epMatch[1], 10) });
+    }
+  }
+
+  return results;
+}
+
+function extractEpisodeMap(streams) {
+  const map = {};
+
+  for (const stream of streams || []) {
+    const filename =
+      stream?.behaviorHints?.filename ||
+      stream?.name ||
+      stream?.title ||
+      "";
+
+    const episodes = parseEpisodes(filename);
+    for (const { season, episode } of episodes) {
+      if (!map[season]) map[season] = {};
+      if (!map[season][episode]) {
+        map[season][episode] = {
+          fileIdx: stream?.fileIdx ?? null,
+          filename,
+        };
+      }
+    }
+  }
+
+  return map;
+}
+
+function pickTorrentTitle(streams) {
+  for (const stream of streams || []) {
+    const title =
+      stream?.title ||
+      stream?.name ||
+      stream?.behaviorHints?.filename ||
+      "";
+    if (title) return title;
+  }
+  return "";
+}
+
+function detectSeriesScope(streams, seasons) {
+  const title = pickTorrentTitle(streams);
+  const text = title.toLowerCase();
+
+  const hasComplete =
+    /complete\s+(series|collection|box\s*set|set)/i.test(text) ||
+    /full\s+series/i.test(text) ||
+    /entire\s+series/i.test(text) ||
+    /all\s+seasons?/i.test(text) ||
+    /series\s+complete/i.test(text);
+
+  const hasSeasonRange =
+    /season\s*\d{1,2}\s*(?:-|to)\s*\d{1,2}/i.test(text) ||
+    /\bs\d{1,2}\s*(?:-|to)\s*\d{1,2}\b/i.test(text);
+
+  const hasSingleSeason =
+    /season\s*\d{1,2}/i.test(text) ||
+    /\bs\d{1,2}\b(?!\s*e)/i.test(text);
+
+  if (hasComplete || hasSeasonRange) return "complete-series";
+
+  if (seasons.length > 1) return "multi-season";
+
+  if (seasons.length === 1 && hasSingleSeason) return "single-season";
+
+  return "unknown";
+}
+
+function classifyTorrent(streams) {
+  const infoHash = streams?.[0]?.infoHash || "";
+  const episodeMap = extractEpisodeMap(streams);
+  const seasons = Object.keys(episodeMap)
+    .map(s => parseInt(s, 10))
+    .filter(n => Number.isFinite(n))
+    .sort((a, b) => a - b);
+
+  let episodeCount = 0;
+  for (const seasonKey of Object.keys(episodeMap)) {
+    episodeCount += Object.keys(episodeMap[seasonKey]).length;
+  }
+
+  const classification = episodeCount > 1 ? "multi-episode" : "single-episode";
+  const seriesScope = detectSeriesScope(streams, seasons);
+
+  return {
+    infoHash,
+    episodeCount,
+    seasons,
+    classification,
+    seriesScope,
+    episodeMap,
+  };
+}
+
 function sizeToBytes(title) {
   const m = title.match(/([\d.]+)\s*(GB|MB)/i);
   if (!m) return 0;
@@ -66,27 +207,10 @@ async function torrentioFetch(url) {
   }
 }
 
-async function rdCache(hash) {
-  console.log("Checking RD cache for hash:", hash);
-  try {
-    const res = await fetch(
-      `https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/${hash}`,
-      { headers: { Authorization: `Bearer ${RD_TOKEN}` } }
-    );
-    const data = await res.json();
-    const isCached = Object.keys(data).length > 0;
-    console.log(`Hash ${hash} is ${isCached ? 'cached' : 'not cached'} in RD`);
-    return isCached;
-  } catch (e) {
-    console.log("RD cache check failed:", e);
-    return false;
-  }
-}
-
 async function rdList() {
   console.log("Listing RD torrents");
   try {
-    const res = await fetch(
+    const res = await rdFetch(
       `https://api.real-debrid.com/rest/1.0/torrents`,
       { headers: { Authorization: `Bearer ${RD_TOKEN}` } }
     );
@@ -110,7 +234,7 @@ async function alreadyAdded(hash) {
 async function addAndDownload(magnet) {
   console.log("Adding magnet to RD:", magnet);
   try {
-    const addRes = await fetch(
+    const addRes = await rdFetch(
       "https://api.real-debrid.com/rest/1.0/torrents/addMagnet",
       {
         method: "POST",
@@ -130,7 +254,7 @@ async function addAndDownload(magnet) {
 
     console.log(`Added magnet, torrent ID: ${data.id}`);
 
-    await fetch(
+    await rdFetch(
       `https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${data.id}`,
       {
         method: "POST",
@@ -188,14 +312,7 @@ async function processMovie(tmdbId) {
     return null;
   }
 
-  console.log(`Checking cache for ${results.length} torrents`);
-  const cached = [];
-  for (const r of results) {
-    if (await rdCache(r.hash)) cached.push(r);
-  }
-  console.log(`${cached.length} torrents are cached in RD`);
-
-  const filtered = cached.filter(r => r.size && r.size <= MOVIE_LIMIT);
+  const filtered = results.filter(r => r.size && r.size <= MOVIE_LIMIT);
   console.log(`${filtered.length} torrents pass size filter (≤15GB)`);
   const ranked = rank(filtered);
 
@@ -235,10 +352,6 @@ async function processEpisode(tmdbId, season, episode) {
       console.log("Season pack already added, skipping");
       continue;
     }
-    if (!(await rdCache(r.hash))) {
-      console.log("Season pack not cached, skipping");
-      continue;
-    }
     if (await addAndDownload(r.magnet)) {
       console.log("Successfully added season pack:", r.title);
       return r;
@@ -255,10 +368,6 @@ async function processEpisode(tmdbId, season, episode) {
     console.log(`Trying episode: ${r.title}`);
     if (await alreadyAdded(r.hash)) {
       console.log("Episode already added, skipping");
-      continue;
-    }
-    if (!(await rdCache(r.hash))) {
-      console.log("Episode not cached, skipping");
       continue;
     }
     if (await addAndDownload(r.magnet)) {
@@ -326,3 +435,5 @@ app.post("/request", async (req, res) => {
 });
 
 app.listen(3000, () => console.log("RD automation running on port 3000"));
+
+export { parseEpisodes, extractEpisodeMap, classifyTorrent };
