@@ -8,6 +8,7 @@ Since I already have Zurg setup, this essentially takes a request (whether from 
 
 ### Prereqs
 - **Docker** installed
+- Seerr running already, setup, in a Docker container
 - A `.env` file in this folder (copy `.env.example` → `.env` and fill in values)
 
 #### Environment Variables Setup
