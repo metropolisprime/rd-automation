@@ -1,4 +1,4 @@
-## RD Automator (Docker)
+## RD Automator
 
 ### Why does this exist?
 
