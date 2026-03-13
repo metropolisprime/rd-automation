@@ -6,6 +6,12 @@ I didn't need the full -ARR stack, and I wanted something that was pretty dead s
 
 Since I already have Zurg setup, this essentially takes a request (whether from the watchlist or a manual request), looks for a cached version and then automatically adds it to my RD account.
 
+This whole setup assumes the following:
+- You have Seerr setup
+- You have RD setup and communicating with your Plex or Jellyfin or whatever instance the way you like it
+- You have a way to either send Seerr requests OR you have logged into Seerr via Plex so you're automatically tracking your watchlist
+- You have at least some familiarity with the command line and Docker
+
 ### Prereqs
 - **Docker** installed
 - Seerr running already, setup, in a Docker container
@@ -14,7 +20,7 @@ Since I already have Zurg setup, this essentially takes a request (whether from 
 #### Environment Variables Setup
 The `.env` file requires the following variables:
 
-- `RD_TOKEN`: Your Real Debrid API token. Get this from your [Real Debrid account settings](https://real-debrid.com/apitoken).
+- `RD_TOKEN`: Your RD API token. Get this from your [Real Debrid account settings](https://real-debrid.com/apitoken).
 - `TMDB_API_KEY`: Your TMDB (The Movie Database) API key. Sign up at [TMDB](https://www.themoviedb.org/settings/api) to get an API key.
 - `MOVIE_LIMIT_GB`: Maximum size limit for movie downloads in gigabytes (default: 15)
 - `EP_LIMIT_GB`: Maximum size limit for episode downloads in gigabytes (default: 7)
