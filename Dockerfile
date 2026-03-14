@@ -9,4 +9,4 @@ COPY rd-auto.js .
 
 EXPOSE 3000
 
-CMD ["node", "rd-auto.js"]
+CMD ["npm", "run", "dev"]

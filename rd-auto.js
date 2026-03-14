@@ -1,17 +1,35 @@
 import express from "express"
-import fetch from "node-fetch"
+import fs from "fs"
+import path from "path"
+
+const fetch = global.fetch || (await import('node-fetch')).default;
 
 const RD_TOKEN = process.env.RD_TOKEN || ""
 const TMDB_API_KEY = process.env.TMDB_API_KEY || ""
 
 const MOVIE_LIMIT_GB = Number(process.env.MOVIE_LIMIT_GB || "15")
 const EP_LIMIT_GB = Number(process.env.EP_LIMIT_GB || "7")
+const DRY_RUN = String(process.env.DRY_RUN || "").toLowerCase() === "true";
 
 const MOVIE_LIMIT = MOVIE_LIMIT_GB * 1024 * 1024 * 1024 // default 15 GB
 const EP_LIMIT = EP_LIMIT_GB * 1024 * 1024 * 1024       // default 7 GB
 
 const app = express();
 app.use(express.json());
+
+const DEBUG_OUTPUT_DIR = path.resolve(process.cwd(), "dry-run-output");
+
+async function saveDryRunJson(filename, obj) {
+  if (!DRY_RUN) return;
+  try {
+    await fs.promises.mkdir(DEBUG_OUTPUT_DIR, { recursive: true });
+    const filePath = path.join(DEBUG_OUTPUT_DIR, filename);
+    await fs.promises.writeFile(filePath, JSON.stringify(obj, null, 2), "utf-8");
+    console.log("Saved dry-run JSON:", filePath);
+  } catch (e) {
+    console.log("Failed to write dry-run JSON:", e);
+  }
+}
 
 // ----------------------- Helpers -----------------------
 
@@ -107,19 +125,19 @@ function detectSeriesScope(streams, seasons) {
   const text = title.toLowerCase();
 
   const hasComplete =
-    /complete\s+(series|collection|box\s*set|set)/i.test(text) ||
-    /full\s+series/i.test(text) ||
-    /entire\s+series/i.test(text) ||
-    /all\s+seasons?/i.test(text) ||
-    /series\s+complete/i.test(text);
+    /complete[\s.]+(series|collection|box[\s.]*set|set)/i.test(text) ||
+    /full[\s.]+series/i.test(text) ||
+    /entire[\s.]+series/i.test(text) ||
+    /all[\s.]+seasons?/i.test(text) ||
+    /series[\s.]+complete/i.test(text);
 
   const hasSeasonRange =
-    /season\s*\d{1,2}\s*(?:-|to)\s*\d{1,2}/i.test(text) ||
-    /\bs\d{1,2}\s*(?:-|to)\s*\d{1,2}\b/i.test(text);
+    /season[\s.]*\d{1,2}[\s.]*(?:-|to)[\s.]*\d{1,2}/i.test(text) ||
+    /\bs\d{1,2}[\s.]*(?:-|to)[\s.]*s?\d{1,2}\b/i.test(text);
 
   const hasSingleSeason =
-    /season\s*\d{1,2}/i.test(text) ||
-    /\bs\d{1,2}\b(?!\s*e)/i.test(text);
+    /season[\s.]*\d{1,2}/i.test(text) ||
+    /\bs\d{1,2}\b(?![e\s])/i.test(text);
 
   if (hasComplete || hasSeasonRange) return "complete-series";
 
@@ -154,6 +172,80 @@ function classifyTorrent(streams) {
     seriesScope,
     episodeMap,
   };
+}
+
+function groupStreamsByInfoHash(streams) {
+  const groups = {};
+  for (const stream of streams || []) {
+    const infoHash = stream?.infoHash || "";
+    if (!infoHash) continue;
+    groups[infoHash] = groups[infoHash] || [];
+    groups[infoHash].push(stream);
+  }
+  return Object.entries(groups).map(([infoHash, streams]) => ({ infoHash, streams }));
+}
+
+function buildTorrentGroups(streams) {
+  const groups = groupStreamsByInfoHash(streams);
+  return groups.map(({ infoHash, streams }) => {
+    const ranked = rank(streams);
+    const representative = ranked[0] || streams[0];
+    const totalSize = streams.reduce((sum, s) => sum + (s.size || 0), 0);
+    const classification = classifyTorrent(streams);
+
+    return {
+      infoHash,
+      title: representative?.title || "",
+      magnet: `magnet:?xt=urn:btih:${infoHash}`,
+      totalSize,
+      streams,
+      ...classification,
+    };
+  });
+}
+
+async function tryAddEpisodeFromEpisodeEndpoint(imdbId, season, episode) {
+  const epUrl = `https://torrentio.strem.fun/stream/series/${imdbId}:${season}:${episode}.json`;
+  const epResults = await torrentioFetch(epUrl);
+  const groups = buildTorrentGroups(epResults);
+
+  const packCandidate = rank(groups).find(group =>
+    group.seriesScope === "complete-series" ||
+    group.seriesScope === "multi-season" ||
+    group.classification === "multi-episode"
+  );
+
+  if (packCandidate) {
+    console.log(`Found season pack candidate from episode endpoint: ${packCandidate.title} (infoHash=${packCandidate.infoHash})`);
+    if (!(await alreadyAdded(packCandidate.infoHash))) {
+      if (await addAndDownload(packCandidate.magnet)) {
+        console.log(`Added season pack from episode endpoint: ${packCandidate.title}`);
+        packCandidate.isSeasonPack = true;
+        return packCandidate;
+      }
+    } else {
+      console.log("Season pack already added, skipping");
+      return null;
+    }
+  }
+
+  const filtered = epResults.filter(r => r.size && r.size <= EP_LIMIT);
+  console.log(`Found ${filtered.length} single episodes passing size filter (≤7GB) from episode endpoint`);
+
+  for (const r of rank(filtered)) {
+    console.log(`Trying episode: ${r.title}`);
+    if (await alreadyAdded(r.hash)) {
+      console.log("Episode already added, skipping");
+      continue;
+    }
+    if (await addAndDownload(r.magnet)) {
+      console.log("Successfully added episode torrent:", r.title);
+      r.isSeasonPack = false;
+      return r;
+    }
+  }
+
+  return null;
 }
 
 function sizeToBytes(title) {
@@ -195,9 +287,14 @@ async function torrentioFetch(url) {
     }
     const streams = data.streams.map(s => ({
       title: s.title,
+      name: s.name,
+      infoHash: s.infoHash,
       hash: s.infoHash,
       magnet: `magnet:?xt=urn:btih:${s.infoHash}`,
       size: sizeToBytes(s.title),
+      fileIdx: s.fileIdx,
+      behaviorHints: s.behaviorHints,
+      raw: s,
     }));
     console.log(`Fetched ${streams.length} torrents from Torrentio`);
     return streams;
@@ -225,6 +322,10 @@ async function rdList() {
 
 async function alreadyAdded(hash) {
   console.log("Checking if torrent already added:", hash);
+  if (DRY_RUN) {
+    console.log("DRY RUN: skipping RD check (treating as not added)");
+    return false;
+  }
   const torrents = await rdList();
   const isAdded = torrents.some(t => t.hash === hash);
   console.log(`Torrent ${hash} is ${isAdded ? 'already added' : 'not added'} to RD`);
@@ -233,6 +334,12 @@ async function alreadyAdded(hash) {
 
 async function addAndDownload(magnet) {
   console.log("Adding magnet to RD:", magnet);
+
+  if (DRY_RUN) {
+    console.log("DRY RUN: skipping Real-Debrid add/download");
+    return true;
+  }
+
   try {
     const addRes = await rdFetch(
       "https://api.real-debrid.com/rest/1.0/torrents/addMagnet",
@@ -340,47 +447,136 @@ async function processEpisode(tmdbId, season, episode) {
     return null;
   }
 
-  // Season pack
   const seasonUrl = `https://torrentio.strem.fun/stream/series/${imdbId}:${season}.json`;
   const seasonResults = await torrentioFetch(seasonUrl);
-  const seasonPacks = seasonResults.filter(s => !s.title.match(/E\d{2}/));
-  console.log(`Found ${seasonPacks.length} season packs`);
+  const seasonGroups = buildTorrentGroups(seasonResults);
+
+  console.log(`Found ${seasonResults.length} streams for season ${season} (grouped into ${seasonGroups.length} unique infoHashes)`);
+
+  const seasonPacks = seasonGroups.filter(group => {
+    const isPack =
+      group.seriesScope === "complete-series" ||
+      group.seriesScope === "multi-season" ||
+      group.classification === "multi-episode";
+
+    if (isPack) {
+      console.log(
+        `Candidate season pack: ${group.title} (infoHash=${group.infoHash} seriesScope=${group.seriesScope} classification=${group.classification} episodes=${group.episodeCount} totalSize=${(group.totalSize / (1024 * 1024 * 1024)).toFixed(2)}GB)`
+      );
+      console.log(`Episode map for ${group.title}:`, JSON.stringify(group.episodeMap));
+    }
+
+    return isPack;
+  });
 
   for (const r of rank(seasonPacks)) {
     console.log(`Trying season pack: ${r.title}`);
-    if (await alreadyAdded(r.hash)) {
+    if (await alreadyAdded(r.infoHash)) {
       console.log("Season pack already added, skipping");
       continue;
     }
     if (await addAndDownload(r.magnet)) {
       console.log("Successfully added season pack:", r.title);
+      r.isSeasonPack = true;
       return r;
     }
   }
 
-  // Single episode
-  const epUrl = `https://torrentio.strem.fun/stream/series/${imdbId}:${season}:${episode}.json`;
-  const epResults = await torrentioFetch(epUrl);
-  const filtered = epResults.filter(r => r.size && r.size <= EP_LIMIT);
-  console.log(`Found ${filtered.length} single episodes passing size filter (≤7GB)`);
+  // If we didn't find a match at the season level, try to find a torrent that contains the
+  // specific episode we are looking for.
+  const episodeCandidates = seasonGroups.filter(group => {
+    return Boolean(group.episodeMap?.[season]?.[episode]);
+  });
 
-  for (const r of rank(filtered)) {
-    console.log(`Trying episode: ${r.title}`);
-    if (await alreadyAdded(r.hash)) {
+  // Prefer smaller episode-size candidates, but keep quality ranking.
+  const episodeCandidatesWithinLimit = episodeCandidates.filter(
+    group => group.totalSize && group.totalSize <= EP_LIMIT
+  );
+
+  const candidatesToTry = episodeCandidatesWithinLimit.length
+    ? episodeCandidatesWithinLimit
+    : episodeCandidates;
+
+  console.log(
+    `Found ${candidatesToTry.length} torrent candidates containing S${season}E${episode}`
+  );
+
+  for (const r of rank(candidatesToTry)) {
+    console.log(`Trying episode candidate: ${r.title} (infoHash=${r.infoHash} totalSize=${(r.totalSize / (1024 * 1024 * 1024)).toFixed(2)}GB)`);
+    if (await alreadyAdded(r.infoHash)) {
       console.log("Episode already added, skipping");
       continue;
     }
     if (await addAndDownload(r.magnet)) {
       console.log("Successfully added episode torrent:", r.title);
+      r.isSeasonPack = false;
       return r;
     }
   }
+
+  // As a last resort, fall back to calling the episode-specific endpoint (when the season stream
+  // doesn't contain the episode in a parsed way).
+  const fallbackResult = await tryAddEpisodeFromEpisodeEndpoint(imdbId, season, episode);
+  if (fallbackResult) return fallbackResult;
 
   console.log("No suitable episode torrent found for TMDb ID:", tmdbId, "S:", season, "E:", episode);
   return null;
 }
 
 async function processAllEpisodes(tmdbId, seasonNumbers) {
+  const imdbId = await tmdbToImdb(tmdbId, "tv");
+  if (!imdbId) {
+    console.log("No IMDb ID found for TV TMDb ID:", tmdbId);
+    return;
+  }
+
+  const debugDump = {
+    tmdbId,
+    imdbId,
+    timestamp: new Date().toISOString(),
+    seriesGroups: [],
+    seasons: {},
+  };
+
+  async function saveDebugDump() {
+    if (!DRY_RUN) return;
+    const filename = `dryrun-${tmdbId}-${Date.now()}.json`;
+    await saveDryRunJson(filename, debugDump);
+  }
+
+  // Try to get a full series listing first (if supported by Torrentio).
+  const seriesUrl = `https://torrentio.strem.fun/stream/series/${imdbId}.json`;
+  const seriesResults = await torrentioFetch(seriesUrl);
+  const seriesGroups = buildTorrentGroups(seriesResults);
+
+  debugDump.seriesGroups = seriesGroups;
+
+  if (seriesGroups.length) {
+    console.log(`Series endpoint returned ${seriesResults.length} streams (${seriesGroups.length} unique torrents)`);
+
+    const seriesPack = rank(seriesGroups).find(group =>
+      group.seriesScope === "complete-series" ||
+      group.seriesScope === "multi-season"
+    );
+
+    if (seriesPack) {
+      console.log(`Found full-series pack candidate: ${seriesPack.title} (episodes=${seriesPack.episodeCount})`);
+      if (!(await alreadyAdded(seriesPack.infoHash))) {
+        if (await addAndDownload(seriesPack.magnet)) {
+          console.log(`Added full-series pack: ${seriesPack.title}`);
+          await saveDebugDump();
+          return;
+        }
+      } else {
+        console.log("Series pack already added, skipping");
+        await saveDebugDump();
+        return;
+      }
+    }
+  } else {
+    console.log("Series endpoint did not return any streams; falling back to per-season fetch");
+  }
+
   for (const season of seasonNumbers) {
     let totalEpisodes = 1;
     try {
@@ -392,11 +588,84 @@ async function processAllEpisodes(tmdbId, seasonNumbers) {
       console.log(`Failed to fetch season ${season} metadata:`, e);
     }
 
+    const seasonGroups = seriesGroups.length
+      ? seriesGroups.filter(group => Boolean(group.episodeMap?.[season]))
+      : buildTorrentGroups(await torrentioFetch(`https://torrentio.strem.fun/stream/series/${imdbId}:${season}.json`));
+
+    debugDump.seasons[season] = {
+      totalEpisodes,
+      seasonGroups,
+    };
+
+    console.log(`Season ${season} has ${seasonGroups.length} candidate torrents`);
+
+    const seasonPack = rank(seasonGroups).find(group =>
+      group.seriesScope === "complete-series" ||
+      group.seriesScope === "multi-season" ||
+      group.classification === "multi-episode"
+    );
+
+    if (seasonPack) {
+      console.log(`Found season pack candidate for S${season}: ${seasonPack.title} (episodes=${seasonPack.episodeCount})`);
+      if (!(await alreadyAdded(seasonPack.infoHash))) {
+        if (await addAndDownload(seasonPack.magnet)) {
+          console.log(`Added season pack for S${season}: ${seasonPack.title}`);
+          continue; // move to next season
+        }
+      } else {
+        console.log("Season pack already added, skipping");
+        continue;
+      }
+    }
+
     for (let ep = 1; ep <= totalEpisodes; ep++) {
-      const result = await processEpisode(tmdbId, season, ep);
-      if (result) console.log(`Added episode S${season}E${ep}: ${result.title}`);
+      const episodeCandidates = seasonGroups.filter(group => Boolean(group.episodeMap?.[season]?.[ep]));
+
+      if (!episodeCandidates.length) {
+        console.log(`No candidate found for S${season}E${ep} in season stream data; falling back to episode endpoint`);
+        const result = await tryAddEpisodeFromEpisodeEndpoint(imdbId, season, ep);
+        if (result && result.isSeasonPack) {
+          console.log(`Added season pack for S${season}: ${result.title} (stopping further episode checks for this season)`);
+          break;
+        }
+        if (result) {
+          console.log(`Added episode S${season}E${ep}: ${result.title}`);
+        }
+        continue;
+      }
+
+      const epCandidatesWithinLimit = episodeCandidates.filter(g => g.totalSize && g.totalSize <= EP_LIMIT);
+      const candidatesToTry = epCandidatesWithinLimit.length ? epCandidatesWithinLimit : episodeCandidates;
+
+      let added = false;
+      for (const candidate of rank(candidatesToTry)) {
+        console.log(`Trying candidate for S${season}E${ep}: ${candidate.title} (infoHash=${candidate.infoHash} size=${(candidate.totalSize / (1024 * 1024 * 1024)).toFixed(2)}GB)`);
+        if (await alreadyAdded(candidate.infoHash)) {
+          console.log("Already added, skipping");
+          continue;
+        }
+        if (await addAndDownload(candidate.magnet)) {
+          console.log(`Added episode S${season}E${ep} via ${candidate.title}`);
+          added = true;
+          break;
+        }
+      }
+
+      if (!added) {
+        console.log(`Could not add S${season}E${ep} from season data; falling back to episode endpoint`);
+        const result = await tryAddEpisodeFromEpisodeEndpoint(imdbId, season, ep);
+        if (result && result.isSeasonPack) {
+          console.log(`Added season pack for S${season}: ${result.title} (stopping further episode checks for this season)`);
+          break;
+        }
+        if (result) {
+          console.log(`Added episode S${season}E${ep}: ${result.title}`);
+        }
+      }
     }
   }
+
+  await saveDebugDump();
 }
 
 // ----------------------- Webhook -----------------------
@@ -434,6 +703,8 @@ app.post("/request", async (req, res) => {
   }
 });
 
-app.listen(3000, () => console.log("RD automation running on port 3000"));
+if (import.meta.url === `file://${process.argv[1]}`) {
+  app.listen(3000, () => console.log("RD automation running on port 3000"));
+}
 
-export { parseEpisodes, extractEpisodeMap, classifyTorrent };
+export { parseEpisodes, extractEpisodeMap, classifyTorrent, app, sizeToBytes, qualityScore, rank, pickTorrentTitle, detectSeriesScope };

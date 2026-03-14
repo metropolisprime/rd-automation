@@ -7,10 +7,15 @@
     "node-fetch": "^3.3.2"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14"
+    "chai": "^4.3.10",
+    "mocha": "^10.2.0",
+    "nodemon": "^3.1.14",
+    "sinon": "^17.0.1",
+    "supertest": "^6.3.3"
   },
   "scripts": {
     "start": "node --env-file=.env rd-auto.js",
-    "dev": "nodemon --legacy-watch rd-auto.js"
+    "dev": "nodemon",
+    "test": "mocha rd-auto.test.js"
   }
 }
