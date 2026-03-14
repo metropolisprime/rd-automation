@@ -230,7 +230,7 @@ async function tryAddEpisodeFromEpisodeEndpoint(imdbId, season, episode) {
   }
 
   const filtered = epResults.filter(r => r.size && r.size <= EP_LIMIT);
-  console.log(`Found ${filtered.length} single episodes passing size filter (≤7GB) from episode endpoint`);
+  console.log(`Found ${filtered.length} single episodes passing size filter (≤${(EP_LIMIT_GB).toFixed(2)}GB) from episode endpoint`);
 
   for (const r of rank(filtered)) {
     console.log(`Trying episode: ${r.title}`);
@@ -420,7 +420,7 @@ async function processMovie(tmdbId) {
   }
 
   const filtered = results.filter(r => r.size && r.size <= MOVIE_LIMIT);
-  console.log(`${filtered.length} torrents pass size filter (≤15GB)`);
+  console.log(`${filtered.length} torrents pass size filter (≤${(MOVIE_LIMIT_GB).toFixed(2)}GB)`);
   const ranked = rank(filtered);
 
   for (const r of ranked) {
