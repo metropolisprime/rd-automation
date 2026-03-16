@@ -6,6 +6,8 @@ const fetch = global.fetch || (await import('node-fetch')).default;
 
 const RD_TOKEN = process.env.RD_TOKEN || ""
 const TMDB_API_KEY = process.env.TMDB_API_KEY || ""
+const SEARCH_PROVIDER_BASE_URL = (process.env.SEARCH_PROVIDER_BASE_URL || "https://torrentio.strem.fun/")
+  .replace(/\/+$/, "");
 
 const MOVIE_LIMIT_GB = Number(process.env.MOVIE_LIMIT_GB || "15")
 const EP_LIMIT_GB = Number(process.env.EP_LIMIT_GB || "7")
@@ -205,8 +207,8 @@ function buildTorrentGroups(streams) {
 }
 
 async function tryAddEpisodeFromEpisodeEndpoint(imdbId, season, episode) {
-  const epUrl = `https://torrentio.strem.fun/stream/series/${imdbId}:${season}:${episode}.json`;
-  const epResults = await torrentioFetch(epUrl);
+  const epUrl = `${SEARCH_PROVIDER_BASE_URL}/stream/series/${imdbId}:${season}:${episode}.json`;
+  const epResults = await searchProviderFetch(epUrl);
   const groups = buildTorrentGroups(epResults);
 
   const packCandidate = rank(groups).find(group =>
@@ -267,22 +269,22 @@ function rank(results) {
   return results.sort((a, b) => qualityScore(b.title) - qualityScore(a.title));
 }
 
-async function torrentioFetch(url) {
-  console.log("Fetching torrents from Torrentio:", url);
+async function searchProviderFetch(url) {
+  console.log("Fetching torrents from Search Provider:", url);
   try {
     const res = await fetch(url);
     if (!res.ok) {
-      console.log("Torrentio fetch failed with status:", res.status);
+      console.log("Search Provider fetch failed with status:", res.status);
       return [];
     }
     const text = await res.text();
     if (!text) {
-      console.log("Torrentio returned empty response");
+      console.log("Search Provider returned empty response");
       return [];
     }
     const data = JSON.parse(text);
     if (!data.streams) {
-      console.log("Torrentio response has no streams");
+      console.log("Search Provider response has no streams");
       return [];
     }
     const streams = data.streams.map(s => ({
@@ -296,10 +298,10 @@ async function torrentioFetch(url) {
       behaviorHints: s.behaviorHints,
       raw: s,
     }));
-    console.log(`Fetched ${streams.length} torrents from Torrentio`);
+    console.log(`Fetched ${streams.length} torrents from Search Provider`);
     return streams;
   } catch (e) {
-    console.log("Torrentio fetch failed:", e);
+    console.log("Search Provider fetch failed:", e);
     return [];
   }
 }
@@ -412,8 +414,8 @@ async function processMovie(tmdbId) {
     return null;
   }
 
-  const url = `https://torrentio.strem.fun/stream/movie/${imdbId}.json`;
-  const results = await torrentioFetch(url);
+  const url = `${SEARCH_PROVIDER_BASE_URL}/stream/movie/${imdbId}.json`;
+  const results = await searchProviderFetch(url);
   if (!results.length) {
     console.log("No torrents found for movie IMDb ID:", imdbId);
     return null;
@@ -447,8 +449,8 @@ async function processEpisode(tmdbId, season, episode) {
     return null;
   }
 
-  const seasonUrl = `https://torrentio.strem.fun/stream/series/${imdbId}:${season}.json`;
-  const seasonResults = await torrentioFetch(seasonUrl);
+  const seasonUrl = `${SEARCH_PROVIDER_BASE_URL}/stream/series/${imdbId}:${season}.json`;
+  const seasonResults = await searchProviderFetch(seasonUrl);
   const seasonGroups = buildTorrentGroups(seasonResults);
 
   console.log(`Found ${seasonResults.length} streams for season ${season} (grouped into ${seasonGroups.length} unique infoHashes)`);
@@ -544,9 +546,9 @@ async function processAllEpisodes(tmdbId, seasonNumbers) {
     await saveDryRunJson(filename, debugDump);
   }
 
-  // Try to get a full series listing first (if supported by Torrentio).
-  const seriesUrl = `https://torrentio.strem.fun/stream/series/${imdbId}.json`;
-  const seriesResults = await torrentioFetch(seriesUrl);
+  // Try to get a full series listing first (if supported by search provider).
+  const seriesUrl = `${SEARCH_PROVIDER_BASE_URL}/stream/series/${imdbId}.json`;
+  const seriesResults = await searchProviderFetch(seriesUrl);
   const seriesGroups = buildTorrentGroups(seriesResults);
 
   debugDump.seriesGroups = seriesGroups;
@@ -590,7 +592,7 @@ async function processAllEpisodes(tmdbId, seasonNumbers) {
 
     const seasonGroups = seriesGroups.length
       ? seriesGroups.filter(group => Boolean(group.episodeMap?.[season]))
-      : buildTorrentGroups(await torrentioFetch(`https://torrentio.strem.fun/stream/series/${imdbId}:${season}.json`));
+      : buildTorrentGroups(await searchProviderFetch(`${SEARCH_PROVIDER_BASE_URL}/stream/series/${imdbId}:${season}.json`));
 
     debugDump.seasons[season] = {
       totalEpisodes,

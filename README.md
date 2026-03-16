@@ -22,6 +22,7 @@ The `.env` file requires the following variables:
 
 - `RD_TOKEN`: Your RD API token. Get this from your [Real Debrid account settings](https://real-debrid.com/apitoken).
 - `TMDB_API_KEY`: Your TMDB (The Movie Database) API key. Sign up at [TMDB](https://www.themoviedb.org/settings/api) to get an API key.
+- `SEARCH_PROVIDER_BASE_URL`: Base URL for the search provider (default: `https://torrentio.strem.fun/`)
 - `MOVIE_LIMIT_GB`: Maximum size limit for movie downloads in gigabytes (default: 15)
 - `EP_LIMIT_GB`: Maximum size limit for episode downloads in gigabytes (default: 7)
 
